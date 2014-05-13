@@ -85,22 +85,54 @@ static void initialize_constants(void)
     val         = idtable.add_string("_val");
 }
 
+static int semant_errors = 0;
+static ostream& error_stream = cerr;
+static Classes classes_;
+
+static const int TYPE_CLASS  = 1;
+static const int TYPE_SELF   = 2;
+static const int TYPE_INSIDE = 3;
+
+void install_basic_classes();
+bool HasCycle(Symbol, std::map<Symbol, int> &);
+void TraversalClass(Symbol);
+void CreateMethodTable(Symbol, const std::vector<Feature> &);
+int CheckTypeClass(Symbol);
+bool TypeCheck(Symbol, Symbol);
+Symbol Lub(Symbol, Symbol);
+Symbol RegularType(Symbol, bool &);
+
+Symbol SetExprType(Expression);
+Symbol CommonDispatchExpr(Symbol, Symbol, Symbol, Expressions);
+Symbol UnaryExpr(Expression, Symbol);
+Symbol BinaryExpr(Expression, Expression, Symbol);
+Symbol Fmt_SELF_TYPE(Symbol);
+
+// own code
+typedef std::map<Symbol, ClassTreeNode> ClassTree;
+
+typedef std::pair<Symbol, Symbol> MethodTableKey;
+typedef std::pair<Formals, Symbol> MethodTableValue;
+typedef SymbolTable<MethodTableKey, MethodTableValue> MethodTable;
+
+typedef SymbolTable<Symbol, Symbol> ObjectTable;
 
 
-ClassTable::ClassTable(Classes classes) : semant_errors(0) , error_stream(cerr), classes_(classes) {
+ClassTree class_tree_;
+MethodTable *method_table;
+ObjectTable *object_table;
+Class_ this_class_;
 
-    /* Fill this in */
-	install_basic_classes();
-	method_table = new MethodTable();
-	object_table = new ObjectTable();
-}
+int errors() { return semant_errors; }
+ostream& semant_error();
+ostream& semant_error(Class_ c);
+ostream& semant_error(Symbol filename, tree_node *t);
 
-ClassTable::~ClassTable() {
-	delete method_table;
-	delete object_table;
-}
+// own code
+bool CheckAndBuildTypeTree();
+void ScopeCheckingAndTypeChecking();
 
-void ClassTable::install_basic_classes() {
+void install_basic_classes() {
 
     // The tree package uses these globals to annotate the classes built below.
    // curr_lineno  = 0;
@@ -209,38 +241,23 @@ void ClassTable::install_basic_classes() {
 
 }
 
-////////////////////////////////////////////////////////////////////
-//
-// semant_error is an overloaded function for reporting errors
-// during semantic analysis.  There are three versions:
-//
-//    ostream& ClassTable::semant_error()                
-//
-//    ostream& ClassTable::semant_error(Class_ c)
-//       print line number and filename for `c'
-//
-//    ostream& ClassTable::semant_error(Symbol filename, tree_node *t)  
-//       print a line number and filename
-//
-///////////////////////////////////////////////////////////////////
 
-ostream& ClassTable::semant_error(Class_ c)
+ostream& semant_error(Class_ c)
 {                                                             
     return semant_error(c->get_filename(),c);
 }    
 
-ostream& ClassTable::semant_error(Symbol filename, tree_node *t)
+ostream& semant_error(Symbol filename, tree_node *t)
 {
     error_stream << filename << ":" << t->get_line_number() << ": ";
     return semant_error();
 }
 
-ostream& ClassTable::semant_error()                  
+ostream& semant_error()                  
 {                                                 
     semant_errors++;                            
     return error_stream;
 } 
-
 
 
 /*   This is the entry point to the semantic checker.
@@ -260,23 +277,29 @@ void program_class::semant()
 {
     initialize_constants();
 
-    /* ClassTable constructor may do some semantic analysis */
-    ClassTable *classtable = new ClassTable(classes);
+    classes_ = classes;
+    method_table = new MethodTable();
+	object_table = new ObjectTable();
 
+	install_basic_classes();
+    
     /* some semantic analysis code may go here */
 
-	if (classtable->CheckAndBuildTypeTree()) {
-		classtable->ScopeCheckingAndTypeChecking();
+	if (CheckAndBuildTypeTree()) {
+		ScopeCheckingAndTypeChecking();
 	}
 
+    delete object_table;
+    delete method_table;
 
-    if (classtable->errors()) {
-	cerr << "Compilation halted due to static semantic errors." << endl;
-	exit(1);
+    if (errors()) {
+        cerr << "Compilation halted due to static semantic errors." << endl;
+        exit(1);
     }
+
 }
 
-bool ClassTable::CheckAndBuildTypeTree()
+bool CheckAndBuildTypeTree()
 {
 	bool has_main = false;
 	// check class redefined
@@ -284,8 +307,7 @@ bool ClassTable::CheckAndBuildTypeTree()
 		Class_ class_ = classes_->nth(i);
 
 		if (class_->get_parent() == Int || class_->get_parent() == Bool || class_->get_parent() == Str) {
-			semant_error(class_) << "class " << class_->get_name()->get_string() << " inherit from " << class_->get_parent()->get_string()
-				<< " is not allowed" << endl;
+			semant_error(class_) << "class " << class_->get_name()->get_string() << " inherit from " << class_->get_parent()->get_string() << " is not allowed" << endl;
 			return false;
 		}
 		ClassTreeNode &node = class_tree_[class_->get_name()];
@@ -343,7 +365,7 @@ bool ClassTable::CheckAndBuildTypeTree()
 	return true;
 }
 
-bool ClassTable::HasCycle(Symbol s, std::map<Symbol, int> &visit_state)
+bool HasCycle(Symbol s, std::map<Symbol, int> &visit_state)
 {
 	visit_state[s] = -1;
 
@@ -361,498 +383,238 @@ bool ClassTable::HasCycle(Symbol s, std::map<Symbol, int> &visit_state)
 	return false;
 }
 
-int ClassTable::CheckTypeClass(Symbol type)
+int CheckTypeClass(Symbol type)
 {
 	if (class_tree_.find(type) != class_tree_.end()) {
-		return 1;
+		return TYPE_CLASS;
 	}
-   	if (type == SELF_TYPE) {
-		return 2;
+   	if (SELF_TYPE == type) {
+		return TYPE_SELF;
 	}
 	if ('_' == type->get_string()[0]) {
-		return 3;
+		return TYPE_INSIDE;
 	}
 	return 0;
 
 }
 
-void ClassTable::ScopeCheckingAndTypeChecking()
+void ScopeCheckingAndTypeChecking()
 {
 	method_table->enterscope();
-	CreateMethodTable(Object, std::vector<method_class *>());
-
+	CreateMethodTable(Object, std::vector<Feature>());
 	TraversalClass(Object);
-
 	method_table->exitscope();
 }
 
-void ClassTable::TraversalClass(Symbol curr_class) 
+
+
+
+
+Symbol SetExprType(Expression expr)
 {
-	//cout << "parse class " << curr_class->get_string() << endl;
-	current_class = curr_class;
-	object_table->enterscope();
-	const ClassTreeNode &node = class_tree_[curr_class];
-	Class_ class_ = node.class_;
-
-	Features features = class_->get_features();
-	// add attr to object_table and check type
-	for (int i = features->first(); features->more(i); i = features->next(i)) {
-		Feature feature = features->nth(i);
-		if (feature->get_type() == Feature_class::ATTR) {
-			attr_class *attr = static_cast<attr_class *>(feature);
-			Symbol attr_type, attr_type_decl = attr->get_type_decl();
-			int check_ret = CheckTypeClass(attr_type_decl);
-			if (check_ret) {
-				if (2 == check_ret) {
-					attr_type = curr_class;
-				} else {
-					attr_type = attr_type_decl;
-				}
-			} else {
-				attr_type = Object;
-				semant_error(class_) << "the type " << attr_type_decl->get_string() << " of attribute " << attr->get_name()->get_string() << " in class " << curr_class->get_string() << "is not defined" << endl;
-			}
-
-			if (attr->get_name() != self) {
-				if (NULL == object_table->lookup(attr->get_name())) {
-					object_table->addid(attr->get_name(), new Symbol(attr_type));
-				} else {
-					if (NULL != object_table->probe(attr->get_name())) {
-						semant_error(class_) << "the attribute " << attr->get_name()->get_string() << " in class " 
-							<< curr_class->get_string() << " is redefined" << endl;
-					} else {
-						semant_error(class_) << "the attribute " << attr->get_name()->get_string() << " in class "
-							<< curr_class->get_string() << " is inherited attributes, not redefined" << endl;
-					}
-				}
-			} else {
-				semant_error(class_) << "the attribute cannot be self in class " << curr_class->get_string() << endl;
-			}
-		}
-	}
-
-	// redundancy with check self in object expr
-	object_table->addid(self, new Symbol(SELF_TYPE));
-
-	// type check attr expression
-	for (int i = features->first(); features->more(i); i = features->next(i)) {
-		Feature feature = features->nth(i);
-		if (feature->get_type() == Feature_class::ATTR) {
-			attr_class *attr = static_cast<attr_class *>(feature);
-			int check_ret = CheckTypeClass(attr->get_type_decl());
-			Symbol attr_type = Object;
-			if (2 == check_ret) {
-				attr_type = curr_class;
-			} else if (0 != check_ret) {
-				attr_type = attr->get_type_decl();
-			}
-			if (!TypeCheck(attr_type, ExprType(attr->get_init()))) {
-				semant_error(class_) << "the init of the attribute " << attr->get_name()->get_string() << " is not cast to " <<  attr_type->get_string() << endl;
-			}
-		}
-	}
-
-	for (int i = features->first(); features->more(i); i = features->next(i)) {
-		Feature feature = features->nth(i);
-		if (feature->get_type() == Feature_class::METHOD) {
-			object_table->enterscope();
-
-			method_class *method = static_cast<method_class *>(feature);
-			Formals formals = method->get_formals();
-
-			for (int j = formals->first(); formals->more(j); j = formals->next(j)) {
-				formal_class *formal = static_cast<formal_class*>(formals->nth(j));
-
-				if (NULL == object_table->probe(formal->get_name())) {
-					Symbol formal_type = Object;
-					int ret = CheckTypeClass(formal->get_type_decl());
-					if (0 != ret && 2 != ret) {
-						formal_type = formal->get_type_decl();
-					}
-					if (formal->get_name() != self) {
-						object_table->addid(formal->get_name(), new Symbol(formal_type));
-					} else {
-						semant_error(class_) << "formal param of method " << method->get_name()->get_string() << " cannot be self" << endl;
-					}
-				} else {
-					semant_error(class_) << "the formal param " << formal->get_name()->get_string() << " of the method " 
-						<< method->get_name()->get_string() << " is redefined" << endl;
-				}
-
-			}
-
-			Symbol body_type = ExprType(method->get_expr());
-
-			Symbol return_type = Object;
-
-			int ret = CheckTypeClass(method->get_return_type());
-			if (ret) {
-				if (ret == 2) {
-					return_type = SELF_TYPE;
-				} else {
-					return_type = method->get_return_type();
-				}
-			}
-
-			//cout << "return type " << return_type -> get_string() <<  " body_type " << body_type->get_string() << endl;
-
-			if (!TypeCheck(return_type, body_type)) {
-				semant_error(class_) << "the expr type of the method " << method->get_name()->get_string() << " is not cast to " << return_type->get_string() << endl;
-			}
-
-
-			object_table->exitscope();
-		}
-	}
-
-
-
-	for (int i = 0; i < static_cast<int>(node.children.size()); i++) {
-		TraversalClass(node.children[i]);
-	}
-
-
-	object_table->exitscope();
-}
-
-Symbol ClassTable::ExprType(Expression expr)
-{
-	int ret = expr->get_category();
-	Symbol type = Object;
-
-	std::set<Symbol> all_sets;
-	all_sets.insert(Int);
-	all_sets.insert(Str);
-	all_sets.insert(Bool);
-	switch(ret) {
-		case Expression_class::INT_CONST:
-			type = Int;
-			break;
-		case Expression_class::BOOL_CONST:
-			type = Bool;
-			break;
-		case Expression_class::STRING_CONST:
-			type = Str;
-			break;
-		case Expression_class::OBJECT:
-			type = ObjectExpr(static_cast<object_class*>(expr));
-			break;
-		case Expression_class::ASSIGN:
-			type = AssignExpr(static_cast<assign_class*>(expr));
-			break;
-		case Expression_class::NEW_: 
-			type = New_Expr(static_cast<new__class*>(expr));
-			break;
-		case Expression_class::DISPATCH:
-			type = DispatchExpr(static_cast<dispatch_class*>(expr));
-			break;
-		case Expression_class::STATIC_DISPATCH:
-			type = StaticDispatchExpr(static_cast<static_dispatch_class*>(expr));
-			break;
-		case Expression_class::COND:
-			type = CondExpr(static_cast<cond_class*>(expr));
-			break;
-		case Expression_class::BLOCK:
-			type = BlockExpr(static_cast<block_class*>(expr));
-			//cout << "Block " << type->get_string() << endl;
-			break;
-		case Expression_class::LET:
-			type = LetExpr(static_cast<let_class*>(expr));
-			break;
-		case Expression_class::TYPCASE:
-			type = TypcaseExpr(static_cast<typcase_class*>(expr));
-			break;
-		case Expression_class::LOOP:
-			type = LoopExpr(static_cast<loop_class*>(expr));
-			break;
-		case Expression_class::ISVOID:
-			type = IsvoidExpr(static_cast<isvoid_class*>(expr));
-			break;
-		case Expression_class::COMP:
-			type = UnaryExpr(static_cast<comp_class*>(expr)->get_e1(), Bool);
-			break;
-		case Expression_class::NEG:
-			type = UnaryExpr(static_cast<neg_class*>(expr)->get_e1(), Int);
-			break;
-		case Expression_class::LT: 
-			{
-				lt_class *lt = static_cast<lt_class*>(expr);
-				type = BinaryExpr(lt->get_e1(), lt->get_e2(), Bool);
-			}
-			break;
-		case Expression_class::LEQ:
-			{
-				leq_class *leq = static_cast<leq_class*>(expr);
-				type = BinaryExpr(leq->get_e1(), leq->get_e2(), Bool);
-			}
-			break;
-		case Expression_class::PLUS:
-			{
-				plus_class *plus = static_cast<plus_class*>(expr);
-				type = BinaryExpr(plus->get_e1(), plus->get_e2(), Int);
-			}
-			break;
-		case Expression_class::SUB:
-			{
-				sub_class *sub = static_cast<sub_class*>(expr);
-				type = BinaryExpr(sub->get_e1(), sub->get_e2(), Int);
-			}
-			break;
-		case Expression_class::MUL:
-			{
-				mul_class *mul = static_cast<mul_class*>(expr);
-				type = BinaryExpr(mul->get_e1(), mul->get_e2(), Int);
-			}
-			break;
-		case Expression_class::DIVIDE:
-			{
-				divide_class *divide = static_cast<divide_class*>(expr);
-				type = BinaryExpr(divide->get_e1(), divide->get_e2(), Int);
-			}
-			break;
-		case Expression_class::EQ:
-			{
-				eq_class *eq = static_cast<eq_class*>(expr);
-				type = EqExpr(eq->get_e1(), eq->get_e2(), all_sets, Bool);
-			}
-			break;
-		case Expression_class::NO_EXPR:
-			type = No_type;
-			break;
-		default:
-			break;
-	}
-
-	expr->set_type(type);
-
+    Symbol type = expr->ExprType();
+    expr->set_type(type);
 	return type;
 
-}	
+}
 
-Symbol ClassTable::ObjectExpr(object_class *object_expr)
+Symbol int_const_class::ExprType()
 {
-	Symbol type, *object_type;
-	if (self == object_expr->get_name()) {
-		type = SELF_TYPE;
-	} else if (NULL != (object_type = object_table->lookup(object_expr->get_name()))) {
+    return Int;
+}
+
+Symbol bool_const_class::ExprType()
+{
+    return Bool;
+}
+
+Symbol string_const_class::ExprType()
+{
+    return Str;
+}
+
+Symbol object_class::ExprType()
+{
+	Symbol type = Object, *object_type = object_table->lookup(name);
+	if (NULL != object_type) {
 		type = *object_type;
 	} else {
-		semant_error(class_tree_[current_class].class_) << "identify " << object_expr->get_name()->get_string() << " in class " << current_class->get_string() << " is not defined" << endl;
-		type = Object;
+		semant_error(this_class_) << "identifier " << name->get_string() << " is not defined" << endl;
 	}
 	return type;
 }
 
-Symbol ClassTable::AssignExpr(assign_class *assign_expr)
+Symbol assign_class::ExprType()
 {
-	Symbol type = ExprType(assign_expr->get_expr()), *object_type;
-	if (self == assign_expr->get_name()) {
-		semant_error(class_tree_[current_class].class_) << "assign to self " << 
-			assign_expr->get_name()->get_string() << " in class " << current_class->get_string() << " is not legal" << endl;
-	} else if (NULL != (object_type = object_table->lookup(assign_expr->get_name()))) {
-		if (!TypeCheck(*object_type, type)) {
-			semant_error(class_tree_[current_class].class_) << "assign to idenftify " 
-				<< assign_expr->get_name()->get_string() << " type " << type->get_string() 
-				<< " cannot cast to " << (*object_type)->get_string() << endl;
-		} 	
-	} else {
-		semant_error(class_tree_[current_class].class_) << "identify " << assign_expr->get_name()->get_string() << " in class " << current_class->get_string() << " is not defined" << endl;
-	}	
-	return type;
+    Symbol type = SetExprType(expr);
+    if (self == name) {
+        semant_error(this_class_) << "assign to self is illegal" << endl;
+    } else {
+        Symbol *object_type = object_table->lookup(name);
+        if (NULL != object_type) {
+            if (!TypeCheck(*object_type, type)) {
+                semant_error(this_class_) << "type " << type->get_string() << " cannot cast to " << (*object_type)->get_string()
+                                     << " in assign to identifier " << name->get_string() << endl;
+            }
+        } else {
+            semant_error(this_class_) << "identifier " << name->get_string() << " is not defined" << endl;
+        }
+    }
+    return type;
 }
 
-Symbol ClassTable::New_Expr(new__class *new_expr)
+Symbol new__class::ExprType()
 {
-	Symbol type;
-	if (SELF_TYPE == new_expr->get_type_name()) {
-		type = SELF_TYPE;
-	} else if (class_tree_.find(new_expr->get_type_name()) != class_tree_.end()) {
-		type = new_expr->get_type_name();
-	} else {
-		semant_error(class_tree_[current_class].class_) << "new type " 
-			<< new_expr->get_type_name()->get_string() << " in class " << current_class->get_string() 
-			<< " is not defined" << endl;
-		type = Object;
-	}
-	return type;
+    Symbol type = Object;
+    int ret = CheckTypeClass(type_name);
+    if (TYPE_SELF == ret || TYPE_CLASS == ret) {
+        type = type_name;
+    } else {
+        semant_error(this_class_) << "new expr type " << type_name->get_string() << " is not defined" << endl;
+    }
+    return type;
 }
 
-Symbol ClassTable::DispatchExpr(dispatch_class *dispatch_expr)
+Symbol dispatch_class::ExprType()
 {
-	Symbol type = ExprType(dispatch_expr->get_expr());
-	return CommonDispatchExpr(type, type, dispatch_expr->get_name(), dispatch_expr->get_actual());
+    Symbol type = SetExprType(expr);
+    return CommonDispatchExpr(type, type, name, actual);
 }
 
-Symbol ClassTable::StaticDispatchExpr(static_dispatch_class *static_dispatch_expr)
+Symbol static_dispatch_class::ExprType()
 {
-	return CommonDispatchExpr(ExprType(static_dispatch_expr->get_expr()), 
-			static_dispatch_expr->get_type_name(), static_dispatch_expr->get_name(), 
-			static_dispatch_expr->get_actual());
+	return CommonDispatchExpr(SetExprType(expr), type_name, name, actual);
 }
 
-Symbol ClassTable::CommonDispatchExpr(Symbol t0, Symbol t1, Symbol name, Expressions actual)
+
+Symbol CommonDispatchExpr(Symbol t0, Symbol t1, Symbol name, Expressions actual)
 {
 	Symbol type = Object;
 
 	std::vector<Symbol> actual_types;
 	for (int i = actual->first(); actual->more(i); i = actual->next(i)) {
-		Expression expr = actual->nth(i);
-		actual_types.push_back(ExprType(expr));
+		actual_types.push_back(SetExprType(actual->nth(i)));
 	}
 
 	if (CheckTypeClass(t1)) {
 		if (TypeCheck(t1, t0)) {
-			Symbol tt1; 
-			if (t1 == SELF_TYPE) {
-				tt1 = current_class;
-			} else {
-				tt1 = t1;
-			}
-			MethodTableKey key = std::make_pair(tt1, name);
+			MethodTableKey key = std::make_pair(Fmt_SELF_TYPE(t1), name);
 			MethodTableValue *val = method_table->lookup(key);
 			if (NULL == val) {
-				semant_error(class_tree_[current_class].class_) << "dispatch method " << name->get_string() << " in class " << current_class->get_string() << " is not defined" << endl;
+				semant_error(this_class_) << "dispatch method " << name->get_string() << " is not defined" << endl;
 			} else {
 				Formals formals = val->first;
-				//cout << "method " << name->get_string() <<  " " << formals->len() << " " << actual_types.size() << endl;
 				if (formals->len() == static_cast<int>(actual_types.size())) {
-
-					//cout << name->get_string() << endl;
 					int i = 0;
 					int j = formals->first();
-
 					while (i < static_cast<int>(actual_types.size()) && formals->more(j)) {
-						//cout << "formal param "<<  formals->nth(j)->get_type_decl() << " actual param " << actual_types[i] << endl;
 						if (!TypeCheck(formals->nth(j)->get_type_decl(), actual_types[i])) {
-							semant_error(class_tree_[current_class].class_) << "the actual param " << actual_types[i]->get_string() 
-								<< " of dispatch method " << name->get_string() << " in class " << current_class->get_string() 
-								<< " cannot cast to " << formals->nth(j)->get_type_decl()->get_string() << endl;
-
+							semant_error(this_class_) << "the actual param type " << actual_types[i]->get_string() 
+                                                 << " of dispatch method " << name->get_string() << " cannot cast to " << formals->nth(j)->get_type_decl()->get_string() << endl;
 						}
 						i++;
 						j = formals->next(j);
 					}
 
 				} else {
-					semant_error(class_tree_[current_class].class_) << "length of dispatch method " << name->get_string() 
-						<< " actual param in class " << current_class->get_string() << " is not same with formal param" << endl;
+					semant_error(this_class_) << "length of dispatch method " << name->get_string() 
+                                         << " actual param is not same with formal param" << endl;
 				}
-				Symbol return_type = val->second;
-				if (SELF_TYPE != return_type) {
-					type = return_type;
+				if (SELF_TYPE != val->second) {
+					type = val->second;
 				} else {
 					type = t0;
 				}
 			}
 		} else {
-			semant_error(class_tree_[current_class].class_) << "static dispatch method " << name->get_string() 
-				<< " in type "  << t1->get_string() << " is not legal in class " << current_class->get_string() << endl;
+			semant_error(this_class_) << "static dispatch method " << name->get_string()
+                                 << " in type " << t1->get_string() << " is illegal" << endl;
 		}
 	} else {
-		semant_error(class_tree_[current_class].class_) << "the type " << t1->get_string() << " in static dispatch method " << name->get_string()
-			<< " is not legal in class " << current_class->get_string() << endl;
+		semant_error(this_class_) << "the type " << t1->get_string() << " in static dispatch method "
+                             << name->get_string() << " is illegal"<< endl;
 	}
 
 	return type;
 
 }
 
-Symbol ClassTable::CondExpr(cond_class *cond_expr)
+Symbol cond_class::ExprType()
 {
-	Symbol pred_type = ExprType(cond_expr->get_pred());
+    Symbol pred_type = SetExprType(pred);
 	if (Bool != pred_type) {
-		semant_error(class_tree_[current_class].class_) << "cond pred type is wrong" << endl;
+		semant_error(this_class_) << "cond pred type is wrong" << endl;
 	}	
-
-	Symbol then_exp_type = ExprType(cond_expr->get_then_exp()),
-		   else_exp_type = ExprType(cond_expr->get_else_exp());
-
+	Symbol then_exp_type = SetExprType(then_exp),
+		   else_exp_type = SetExprType(else_exp);
 	return Lub(then_exp_type, else_exp_type);
 }
 
-Symbol ClassTable::BlockExpr(block_class *block_expr)
+Symbol block_class::ExprType()
 {
-	Symbol type;
-	Expressions exprs = block_expr->get_body();
-	for (int i = exprs->first(); exprs->more(i); i = exprs->next(i)) {
-		type = ExprType(exprs->nth(i));
+    Symbol type;
+	for (int i = body->first(); body->more(i); i = body->next(i)) {
+		type = SetExprType(body->nth(i));
 	}
 	return type;
 }
 
-Symbol ClassTable::LetExpr(let_class *let_expr)
+Symbol let_class::ExprType()
 {
-	Symbol type;
+	Symbol type, type_decl_1 = Object;
 
-	Symbol type_decl;
-
-	int ret = CheckTypeClass(let_expr->get_type_decl());
-
-	if (2 == ret) {
-		type_decl = SELF_TYPE;
-	} else if (0 != ret) {
-		type_decl = let_expr->get_type_decl();
+	if (CheckTypeClass(type_decl)) {
+		type_decl_1 = type_decl;
 	} else {
-		semant_error(class_tree_[current_class].class_) << "let expr the type " << let_expr->get_type_decl()->get_string() 
-			<< " is not defined in class " << current_class->get_string() << endl;
-		type_decl = Object;
+		semant_error(this_class_) << "let expr the type " << type_decl->get_string() << " is not defined" << endl;
 	}
-	Symbol init_type = ExprType(let_expr->get_init());
-	if (!TypeCheck(type_decl, init_type)) {
-		semant_error(class_tree_[current_class].class_) << "let expr the init type " 
-			<< init_type->get_string() << " cannot cast to " << type_decl->get_string() << endl;
+	Symbol init_type = SetExprType(init);
+	if (!TypeCheck(type_decl_1, init_type)) {
+		semant_error(this_class_) << "let expr the init type " << init_type->get_string()
+                             << " cannot cast to " << type_decl_1->get_string() << endl;
 	}
-
 	object_table->enterscope();
-
-	if (self != let_expr->get_identifier()) {  
-		object_table->addid(let_expr->get_identifier(), new Symbol(type_decl));
+	if (self != identifier) {  
+		object_table->addid(identifier, new Symbol(type_decl_1));
 	} else {
-		semant_error(class_tree_[current_class].class_) << "let expr bind self" << endl;
+		semant_error(this_class_) << "let expr bind self is illegal" << endl;
 	}
-
-	type = ExprType(let_expr->get_body());
-
+	type = SetExprType(body);
 	object_table->exitscope();
 	return type;
 }
 
-Symbol ClassTable::TypcaseExpr(typcase_class *typcase_expr)
+
+Symbol typcase_class::ExprType()
 {
 	Symbol type = Object;
 	bool inited = false;
-
-	ExprType(typcase_expr->get_expr());
-
-	Cases cases = typcase_expr->get_cases();
+	SetExprType(expr);
 
 	std::set<Symbol> type_decls;
-
 	for (int i = cases->first(); cases->more(i); i = cases->next(i)) {
 		branch_class *branch = static_cast<branch_class*>(cases->nth(i));
 		object_table->enterscope();
-		Symbol type_decl;
-
-		if (1 == CheckTypeClass(branch->get_type_decl())) {
+		Symbol type_decl = Object;
+		if (TYPE_CLASS == CheckTypeClass(branch->get_type_decl())) {
 			type_decl = branch->get_type_decl();
 			if (type_decls.find(type_decl) == type_decls.end()) {
 				type_decls.insert(type_decl);
 			} else {
-				semant_error(class_tree_[current_class].class_) << "case expr the type decl " << branch->get_type_decl()->get_string() 
-					<< " is conflict" << endl; 
+				semant_error(this_class_) << "case expr the type decl " << branch->get_type_decl()->get_string() 
+                                     << " is conflict" << endl; 
 			}
 		} else {
-			semant_error(class_tree_[current_class].class_) << "case expr the type " << branch->get_type_decl()->get_string() 
-				<< " is not defined" << endl; 
-			type_decl = Object;
+			semant_error(this_class_) << "case expr the type " << branch->get_type_decl()->get_string() 
+                                 << " is not defined" << endl; 
 		}
 		object_table->addid(branch->get_name(), new Symbol(type_decl));
 
 		if (!inited)  {
 			inited = true;
-			type = ExprType(branch->get_expr());
+			type = SetExprType(branch->get_expr());
 		} else {
-			type = Lub(type, ExprType(branch->get_expr())); 
+			type = Lub(type, SetExprType(branch->get_expr())); 
 		}
 
 		object_table->exitscope();
@@ -861,80 +623,123 @@ Symbol ClassTable::TypcaseExpr(typcase_class *typcase_expr)
 	return type;
 }
 
-Symbol ClassTable::LoopExpr(loop_class *loop_expr)
+Symbol loop_class::ExprType()
 {
-	Symbol type = Object;
-
-	Symbol pred_type = ExprType(loop_expr->get_pred());
-
-	if (pred_type != Bool) {
-		semant_error(class_tree_[current_class].class_) << "the type of pred in while is not bool" << endl;
+    Symbol type = Object;
+	if (SetExprType(pred) != Bool) {
+		semant_error(this_class_) << "the type of pred in while is not bool" << endl;
 	}
+	SetExprType(body);
+	return type;
+}
 
-	ExprType(loop_expr->get_body());
+Symbol isvoid_class::ExprType()
+{
+    Symbol type = Bool;
 
+	SetExprType(e1);
 
 	return type;
 }
 
-Symbol ClassTable::IsvoidExpr(isvoid_class *isvoid_expr)
+bool InlineClass(Symbol type)
+{
+    return type == Int || type == Str || type == Bool;
+}
+
+Symbol eq_class::ExprType()
 {
 	Symbol type = Bool;
-
-	ExprType(isvoid_expr->get_e1());
-
-	return type;
-}
-
-Symbol ClassTable::UnaryExpr(Expression e1, Symbol target_type)
-{
-	Symbol type = target_type;
-
-	Symbol real_type = ExprType(e1);
-	if (real_type != target_type) {
-		semant_error(class_tree_[current_class].class_) << "the type of unary expr is not " <<  target_type->get_string() << endl;
-	}
-
-	return type;
-}
-
-Symbol ClassTable::BinaryExpr(Expression e1, Expression e2, Symbol target_type)
-{
-	Symbol type = target_type;
-
-	Symbol e1_type = ExprType(e1),
-		   e2_type = ExprType(e2);
-
-	if (e1_type != Int) {
-		semant_error(class_tree_[current_class].class_) << "the type of binary expr e1 is not allowed" << endl;
-	} 
-	if (e2_type != Int) {
-		semant_error(class_tree_[current_class].class_) << "the type of binary expr e2 is not allowed" << endl;
-	} 
-	return type;
-}
-
-Symbol ClassTable::EqExpr(Expression e1, Expression e2, std::set<Symbol> limits_type, Symbol target_type)
-{
-	Symbol type = target_type;
-
-	Symbol e1_type = ExprType(e1),
-		   e2_type = ExprType(e2);
-
-	if (limits_type.find(e1_type) != limits_type.end() 
-			|| limits_type.find(e2_type) != limits_type.end()) {
+	Symbol e1_type = SetExprType(e1), e2_type = SetExprType(e2);
+	if (InlineClass(e1_type) || InlineClass(e2_type)) {
 		if (e1_type != e2_type) {
-			semant_error(class_tree_[current_class].class_) << "sq expr type of e1 must be same with type of e2, when some one type is Int, String, Bool" << endl;
+			semant_error(this_class_) << "eq expr type of e1 must be same with type of e2, when one type is Int, String, Bool" << endl;
 		}
 	}
+	return type;
+}
 
+Symbol UnaryExpr(Expression e1, Symbol target_type)
+{
+	Symbol type = target_type;
+	if (SetExprType(e1) != target_type) {
+		semant_error(this_class_) << "the type of unary expr is not " <<  target_type->get_string() << endl;
+	}
+	return type;
+}
+
+
+Symbol BinaryExpr(Expression e1, Expression e2, Symbol target_type)
+{
+	Symbol type = target_type;
+
+	Symbol e1_type = SetExprType(e1), e2_type = SetExprType(e2);
+
+	if (e1_type != Int) {
+		semant_error(this_class_) << "the type of binary expr e1 is not allowed" << endl;
+	} 
+	if (e2_type != Int) {
+		semant_error(this_class_) << "the type of binary expr e2 is not allowed" << endl;
+	} 
 	return type;
 }
 
 
 
+Symbol Fmt_SELF_TYPE(Symbol type)
+{
+    if (type == SELF_TYPE) {
+        return this_class_->get_name();
+    } 
+    return type;
+}
 
-Symbol ClassTable::Lub(Symbol t1, Symbol t2)
+Symbol comp_class::ExprType()
+{
+    return UnaryExpr(e1, Bool);
+}
+
+Symbol neg_class::ExprType()
+{
+    return UnaryExpr(e1, Int);
+}
+
+Symbol lt_class::ExprType()
+{
+    return BinaryExpr(e1, e2, Bool);
+}
+
+Symbol leq_class::ExprType()
+{
+    return BinaryExpr(e1, e2, Bool);
+}
+
+Symbol plus_class::ExprType()
+{
+    return BinaryExpr(e1, e2, Int);
+}
+
+Symbol sub_class::ExprType()
+{
+    return BinaryExpr(e1, e2, Int);
+}
+
+Symbol mul_class::ExprType()
+{
+    return BinaryExpr(e1, e2, Int);
+}
+
+Symbol divide_class::ExprType()
+{
+    return BinaryExpr(e1, e2, Int);
+}
+
+Symbol no_expr_class::ExprType()
+{
+    return No_type;
+}
+
+Symbol Lub(Symbol t1, Symbol t2)
 {
 	bool least_r1 = false, least_r2 = false;
 	t1 = RegularType(t1, least_r1);
@@ -949,55 +754,42 @@ Symbol ClassTable::Lub(Symbol t1, Symbol t2)
 				return SELF_TYPE;
 			} else {
 				if (t1 == SELF_TYPE) {
-					t1 = current_class;
+					t1 = this_class_->get_name();
 				}
 
 				if (t2 == SELF_TYPE) {
-					t2 = current_class;
+					t2 = this_class_->get_name();
 				}
-
-
 				Symbol s1 = t1;
-
 				while (s1 != No_class) {
 					Symbol s2 = t2;
-
 					while (s2 != No_class) {
 						if (s1 == s2) {
 							return s1;
 						}
 						s2 = class_tree_[s2].parent;
 					}
-
 					s1 = class_tree_[s1].parent;
-
 				}
 			}
-
 		}
 	}
-
 	// never reach this
 	return Object;
 }
 
 
-bool ClassTable::TypeCheck(Symbol t1, Symbol t2)
+bool TypeCheck(Symbol t1, Symbol t2)
 {
 	bool least_r1 = false, least_r2 = false;
 	t1 = RegularType(t1, least_r1);
 	t2 = RegularType(t2, least_r2);
-
-	//cout << t1->get_string() << " " << least_r1 << endl;
-	//cout << t2->get_string() << " " << least_r2 << endl;
-
 	if (least_r1) {
 		return least_r2;
 	} else {
 		if (least_r2) {
 			return true;
 		} else {
-
 			if (t1 == SELF_TYPE) {
 				if (t2 == SELF_TYPE) {
 					return true;
@@ -1006,7 +798,7 @@ bool ClassTable::TypeCheck(Symbol t1, Symbol t2)
 				}
 			} else {
 				if (t2 == SELF_TYPE) {
-					t2 = current_class;
+					t2 = this_class_->get_name();
 				}
 				Symbol s = t2;
 				while (s != No_class) {
@@ -1022,109 +814,43 @@ bool ClassTable::TypeCheck(Symbol t1, Symbol t2)
 	return false;
 }
 
-Symbol ClassTable::RegularType(Symbol t, bool &least)
+Symbol RegularType(Symbol t, bool &least)
 {
 	int ret = CheckTypeClass(t);
-	if (0 == ret) {
-		return Object;
-	} else if (2 == ret) {
-		return SELF_TYPE;
-	} else if (3 == ret) {
+	if (TYPE_CLASS == ret || TYPE_SELF == ret) {
+        return t;
+	} else if (TYPE_INSIDE == ret) {
 		least = true;
 		return t;
 	} else {
-		return t;
+        return Object;
 	}
 }
 
-
-void ClassTable::CreateMethodTable(Symbol curr_class, const std::vector<method_class *> &ancestor_method)
+void CreateMethodTable(Symbol curr_class, const std::vector<Feature> &ancestor_method)
 {
 	const ClassTreeNode &node = class_tree_[curr_class];
+    this_class_ = node.class_;
+	std::vector<Feature> new_method;
 
-	std::vector<method_class *> new_method;
-
-	Class_ class_ = node.class_;
-	Features features = class_->get_features();
+	Features features = this_class_->get_features();
 	for (int i = features->first(); features->more(i); i = features->next(i)) {
 		Feature feature = features->nth(i);
-		if (feature->get_type() == Feature_class::METHOD) {
-			method_class *method = static_cast<method_class *>(feature);
-			MethodTableKey key = std::make_pair(curr_class, method->get_name());
-			if (method_table->probe(key) == NULL) {
-				if (!CheckTypeClass(method->get_return_type())) {
-					semant_error(class_) << "return type " << method->get_return_type()->get_string() << " of method " << method->get_name()->get_string() << " in class " << curr_class->get_string() << " is not defined" << endl;
-				}
-				Formals formals = method->get_formals();
-				for (int j = formals->first(); formals->more(j); j = formals->next(j)) {
-					Formal formal = formals->nth(j);
-					int ret = CheckTypeClass(formal->get_type_decl());
-					if (0 == ret || 2 == ret) {
-						std::string msg;
-						if (0 == ret) {
-							msg = " is not defined";
-						} else if (2 == ret) {
-							msg = " is SELF_TYPE, not allowed";
-						}
-						semant_error(class_) << "formal parameter type " << formal->get_type_decl()->get_string() << " of method " 
-							<< method->get_name()->get_string() << " in class " << curr_class->get_string() 
-							<< msg << endl;
-					} 				
-				}
-
-				method_table->addid(key, new MethodTableValue(formals, method->get_return_type()));
-				new_method.push_back(method);
-			} else {
-				semant_error(class_) << "method " << method->get_name()->get_string() << " redefined in class " << curr_class->get_string() << endl;
-			}
+		if (feature->GetType() == Feature_class::METHOD) {
+            if (feature->CheckTypeAndInsertToSymbolTab()) {
+                new_method.push_back(feature);
+            }
 		}
 	}
 
-	std::vector<method_class *> next_ancestor_method;
+	std::vector<Feature> next_ancestor_method;
 
 	for (int i = 0; i < static_cast<int>(ancestor_method.size()); i++) {
-		method_class *method = ancestor_method[i];
-		MethodTableKey key = std::make_pair(curr_class, method->get_name());
-		MethodTableValue *val = method_table->probe(key);
-		if (NULL == val) {
-			method_table->addid(key, new MethodTableValue(method->get_formals(), method->get_return_type()));
-			next_ancestor_method.push_back(method);
-		} else {
-			int is_valid = 0;
-			if (method->get_return_type() == val->second) {
-				Formals formals = method->get_formals(), now_formals = val->first;
-				if (formals->len() == now_formals->len()) {
-					int j = formals->first();
-					int k = now_formals->first();
-					while (formals->more(j) && now_formals->more(k)) {
-						if (formals->nth(j)->get_type_decl() != now_formals->nth(k)->get_type_decl()) {
-							is_valid = -1;
-							break;
-						}
-						j = formals->next(j);
-						k = now_formals->next(k);
-					}
-
-				} else {
-					is_valid = -2;
-				}
-			} else {
-				is_valid = -3;
-			}
-			if (0 != is_valid) {
-				std::string msg;
-				if (-1 == is_valid) {
-					msg = "the type of formal parameter is not same";
-				} else if (-2 == is_valid) {
-					msg = "the number of formal parameters is not same";
-				} else if (-3 == is_valid) {
-					msg = "return type is not same";
-				}
-				semant_error(class_) << "the redefinition of method " << method->get_name()->get_string() << " in class " 
-					<< curr_class->get_string() << " is invalid: " << msg << endl;
-			}
-		}
+        if (ancestor_method[i]->AncestorAdd()) {
+            next_ancestor_method.push_back(ancestor_method[i]);
+        }
 	}
+    
 	for (int i = 0; i < static_cast<int>(new_method.size()); i++) {
 		next_ancestor_method.push_back(new_method[i]);
 	}
@@ -1133,6 +859,206 @@ void ClassTable::CreateMethodTable(Symbol curr_class, const std::vector<method_c
 		CreateMethodTable(node.children[i], next_ancestor_method);
 	}
 }
+
+void TraversalClass(Symbol curr_class) 
+{
+    const ClassTreeNode &node = class_tree_[curr_class];
+	this_class_ = node.class_;
+
+	object_table->enterscope();
+
+	Features features = this_class_->get_features();
+	// add attr to object_table and check type
+	for (int i = features->first(); features->more(i); i = features->next(i)) {
+		Feature feature = features->nth(i);
+		if (feature->GetType() == Feature_class::ATTR) {
+            feature->CheckTypeAndInsertToSymbolTab();
+
+            feature->AncestorAdd();
+            
+
+		}
+	}
+
+	object_table->addid(self, new Symbol(SELF_TYPE));
+
+	// type check attr expression
+	for (int i = features->first(); features->more(i); i = features->next(i)) {
+		Feature feature = features->nth(i);
+		if (feature->GetType() == Feature_class::ATTR) {
+            feature->CheckExprType();
+		}
+	}
+
+    // i think check and output attr first, and then check method is more friendly
+	for (int i = features->first(); features->more(i); i = features->next(i)) {
+		Feature feature = features->nth(i);
+		if (feature->GetType() == Feature_class::METHOD) {
+            feature->CheckExprType();
+		}
+	}
+
+
+	for (int i = 0; i < static_cast<int>(node.children.size()); i++) {
+		TraversalClass(node.children[i]);
+	}
+
+
+	object_table->exitscope();
+}
+
+bool attr_class::CheckTypeAndInsertToSymbolTab()
+{
+    Symbol attr_type = Object;
+    if (CheckTypeClass(type_decl)) {
+        attr_type = type_decl;
+    } else {
+        semant_error(this_class_) << "the type " << type_decl->get_string() << " of attribute "
+                             << name->get_string() << " is not defined" << endl;
+    }
+    if (name != self) {
+        if (NULL == object_table->lookup(name)) {
+            object_table->addid(name, new Symbol(attr_type));
+            return true;
+        } else {
+            if (NULL != object_table->probe(name)) {
+                semant_error(this_class_) << "the attribute " << name->get_string() << " is redefined" << endl;
+            } else {
+                semant_error(this_class_) << "the attribute " << name->get_string()
+                                          <<  " is inherited attributes, cannot redefined" << endl;
+            }
+        }
+    } else {
+        semant_error(this_class_) << "the attribute cannot be self" << endl;
+    }
+    return false;
+
+}
+
+bool attr_class::AncestorAdd()
+{
+    // implicit add in object_table
+    return true;
+}
+
+void attr_class::CheckExprType()
+{
+    if (!TypeCheck(type_decl, SetExprType(init))) {
+        semant_error(this_class_) << "the init of the attribute " << name->get_string()
+                             << " is not cast to " <<  type_decl->get_string() << endl;
+    }
+}
+
+bool method_class::CheckTypeAndInsertToSymbolTab()
+{
+    MethodTableKey key = std::make_pair(this_class_->get_name(), name);
+    if (method_table->probe(key) == NULL) {
+        if (!CheckTypeClass(return_type)) {
+            semant_error(this_class_) << "return type " << return_type->get_string() << " of method "
+                                 << name->get_string() << " is not defined" << endl;
+        }
+        for (int j = formals->first(); formals->more(j); j = formals->next(j)) {
+            Formal formal = formals->nth(j);
+            int ret = CheckTypeClass(formal->get_type_decl());
+            if (0 == ret || TYPE_SELF == ret) {
+                std::string msg;
+                if (0 == ret) {
+                    msg = " is not defined";
+                } else if (TYPE_SELF == ret) {
+                    msg = " is SELF_TYPE, not allowed";
+                }
+                semant_error(this_class_) << "formal parameter type " << formal->get_type_decl()->get_string() << " of method " 
+                                          << name->get_string() << msg << endl;
+            } 				
+        }
+        method_table->addid(key, new MethodTableValue(formals, return_type));
+        return true;
+    } else {
+        semant_error(this_class_) << "method " << name->get_string() << " is redefined" << endl;
+        return false;
+    }
+}
+
+bool method_class::AncestorAdd()
+{
+    MethodTableKey key = std::make_pair(this_class_->get_name(), name);
+    MethodTableValue *val = method_table->probe(key);
+    if (NULL == val) {
+        method_table->addid(key, new MethodTableValue(formals, return_type));
+        return true;
+    } else {
+        int is_valid = 0;
+        if (return_type == val->second) {
+            Formals now_formals = val->first;
+            if (formals->len() == now_formals->len()) {
+                int j = formals->first();
+                int k = now_formals->first();
+                while (formals->more(j) && now_formals->more(k)) {
+                    if (formals->nth(j)->get_type_decl() != now_formals->nth(k)->get_type_decl()) {
+                        is_valid = -1;
+                        break;
+                    }
+                    j = formals->next(j);
+                    k = now_formals->next(k);
+                }
+
+            } else {
+                is_valid = -2;
+            }
+        } else {
+            is_valid = -3;
+        }
+        if (0 != is_valid) {
+            std::string msg;
+            if (-1 == is_valid) {
+                msg = "the type of formal parameter is not same";
+            } else if (-2 == is_valid) {
+                msg = "the number of formal parameters is not same";
+            } else if (-3 == is_valid) {
+                msg = "return type is not same";
+            }
+            semant_error(this_class_) << "the redefinition of method " << name->get_string() << " in class " << this_class_->get_name()->get_string() << " is invalid: " << msg << endl;
+        }
+        return false;
+    }    
+    
+}
+
+void method_class::CheckExprType()
+{
+    object_table->enterscope();
+
+    for (int j = formals->first(); formals->more(j); j = formals->next(j)) {
+        Formal formal = formals->nth(j);
+        if (NULL == object_table->probe(formal->get_name())) {
+            Symbol formal_type = Object;
+            int ret = CheckTypeClass(formal->get_type_decl());
+            if (0 != ret && TYPE_SELF != ret) {
+                formal_type = formal->get_type_decl();
+            }
+            if (formal->get_name() != self) {
+                object_table->addid(formal->get_name(), new Symbol(formal_type));
+            } else {
+                semant_error(this_class_) << "formal param of method "
+                                          << name->get_string() << " cannot be self" << endl;
+            }
+        } else {
+            semant_error(this_class_) << "the formal param " << formal->get_name()->get_string() << " of the method " 
+                                 << name->get_string() << " is redefined" << endl;
+        }
+
+    }
+
+    if (!TypeCheck(return_type, SetExprType(expr))) {
+        semant_error(this_class_) << "the expr type of the method " << name->get_string() << " is not cast to " << return_type->get_string() << endl;
+    }
+
+
+    object_table->exitscope();
+}
+
+
+
 
 
 
