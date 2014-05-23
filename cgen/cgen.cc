@@ -532,6 +532,18 @@ void CgenClassTable::code_class_protObj()
 		l->hd()->code_protObj(str, idx++);
 }
 
+void CgenClassTable::code_class_initObj()
+{
+	for (List<CgenNode> *l = nds; l; l = l->tl()) 
+		l->hd()->code_initObj(str);
+}
+
+void CgenClassTable::code_class_method()
+{
+	for (List<CgenNode> *l = nds, l; l = l->tl())
+		l->hd()->code_method(str);
+}
+
 //***************************************************
 //
 //  Emit code to start the .data segment and to
@@ -861,6 +873,12 @@ void CgenClassTable::code()
   if (cgen_debug) cout << "coding constants" << endl;
   code_constants();
 
+//                 Add your code to emit
+//                   - prototype objects
+//                   - class_nameTab
+//                   - dispatch tables
+//
+
   if (cgen_debug) cout << "coding class_nameTab" << endl;
   code_class_nameTab();
 
@@ -875,12 +893,6 @@ void CgenClassTable::code()
 
 
 
-//                 Add your code to emit
-//                   - prototype objects
-//                   - class_nameTab
-//                   - dispatch tables
-//
-
   if (cgen_debug) cout << "coding global text" << endl;
   code_global_text();
 
@@ -888,6 +900,12 @@ void CgenClassTable::code()
 //                   - object initializer
 //                   - the class methods
 //                   - etc...
+
+  if (cgen_debug) cout << "coding class_initObj" << endl;
+  code_class_initObj();
+
+  if (cgen_debug) cout << "coding class_method" << endl;
+  code_class_method();
 
 }
 
@@ -1017,6 +1035,28 @@ void attr_class::emit_attr(std::vector<Symbol> &attrs_init, std::set<Symbol> &at
 	}
 }
 
+void CgenNode::code_initObj(ostream &s)
+{
+	emit_init_ref(name, s); s << LABEL;
+
+}
+
+void CgenNode::code_method(ostream &s)
+{
+
+}
+
+void method_class::code(ostream &s, CgenNodeP node)
+{
+	emit_method_ref(node->name, name, s); s << LABEL;
+
+}
+
+void attr_class::code(ostream &s)
+{
+	// keep empty
+}
+
 
 //******************************************************************
 //
@@ -1107,6 +1147,7 @@ void no_expr_class::code(ostream &s) {
 }
 
 void object_class::code(ostream &s) {
+
 }
 
 

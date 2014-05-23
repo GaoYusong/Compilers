@@ -38,6 +38,7 @@ private:
    void code_class_objTab();
    void code_class_dispTab();
    void code_class_protObj();
+   void code_class_initObj();
 
 // The following creates an inheritance graph from
 // a list of classes.  The graph is implemented as
@@ -80,6 +81,7 @@ public:
    void code_dispTab(CgenNodeP node, std::set<Symbol>&, std::vector<std::pair<Symbol, Symbol> >&);
    void code_protObj(ostream &s, int);
    void get_attrs(std::vector<Symbol> &, std::set<Symbol> &, CgenNodeP);
+   void code_initObj(ostream &s);
 };
 
 class BoolConst 
