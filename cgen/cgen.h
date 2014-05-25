@@ -1,6 +1,6 @@
 #include <assert.h>
 #include <stdio.h>
-#include <set>
+#include <map>
 #include <vector>
 #include <utility>
 #include "emit.h"
@@ -39,6 +39,8 @@ private:
    void code_class_dispTab();
    void code_class_protObj();
    void code_class_initObj();
+   void code_class_method();
+   void code_class_inheritTab();
 
 // The following creates an inheritance graph from
 // a list of classes.  The graph is implemented as
@@ -75,13 +77,17 @@ public:
    CgenNodeP get_parentnd() { return parentnd; }
    int basic() { return (basic_status == Basic); }
 
+   void get_features(int, CgenNodeP, std::vector<Symbol> &, std::map<Symbol, Symbol> &);
+   int get_offset(Symbol, int);
+   Symbol get_low_method_type(Symbol);
+
    void code_classname(ostream &s);
    void code_classobj(ostream &s);
    void code_dispTab(ostream &s);
-   void code_dispTab(CgenNodeP node, std::set<Symbol>&, std::vector<std::pair<Symbol, Symbol> >&);
    void code_protObj(ostream &s, int);
-   void get_attrs(std::vector<Symbol> &, std::set<Symbol> &, CgenNodeP);
    void code_initObj(ostream &s);
+   void code_method(ostream &s);
+
 };
 
 class BoolConst 

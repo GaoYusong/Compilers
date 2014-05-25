@@ -25,8 +25,13 @@
 #include "cgen.h"
 #include "cgen_gc.h"
 #include <set>
+#include <map>
 #include <vector>
 #include <utility>
+#include <iostream>
+#include <sstream>
+#include <assert.h>
+
 
 
 extern void emit_string_constant(ostream& str, char *s);
@@ -120,6 +125,15 @@ static char *gc_collect_names[] =
 BoolConst falsebool(FALSE);
 BoolConst truebool(TRUE);
 
+SymbolTable<Symbol, int> *locations = NULL;
+CgenNodeP self_ = NULL;
+CgenClassTableP class_table = NULL;
+int sp_level;
+int LABEL_COUNT = 0;
+std::map<Symbol, int> n2tag;
+
+#define CLASSINHERITTAB "class_inheritTab"
+
 //*********************************************************
 //
 // Define method for code generation
@@ -159,13 +173,13 @@ void program_class::cgen(ostream &os)
 //
 //////////////////////////////////////////////////////////////////////////////
 
-static void emit_load(char *dest_reg, int offset, char *source_reg, ostream& s)
+static void emit_load(const char *dest_reg, int offset, const char *source_reg, ostream& s)
 {
   s << LW << dest_reg << " " << offset * WORD_SIZE << "(" << source_reg << ")" 
     << endl;
 }
 
-static void emit_store(char *source_reg, int offset, char *dest_reg, ostream& s)
+static void emit_store(const char *source_reg, int offset, const char *dest_reg, ostream& s)
 {
   s << SW << source_reg << " " << offset * WORD_SIZE << "(" << dest_reg << ")"
       << endl;
@@ -174,7 +188,7 @@ static void emit_store(char *source_reg, int offset, char *dest_reg, ostream& s)
 static void emit_load_imm(char *dest_reg, int val, ostream& s)
 { s << LI << dest_reg << " " << val << endl; }
 
-static void emit_load_address(char *dest_reg, char *address, ostream& s)
+static void emit_load_address(const char *dest_reg, const char *address, ostream& s)
 { s << LA << dest_reg << " " << address << endl; }
 
 static void emit_partial_load_address(char *dest_reg, ostream& s)
@@ -201,7 +215,7 @@ static void emit_load_int(char *dest, IntEntry *i, ostream& s)
   s << endl;
 }
 
-static void emit_move(char *dest_reg, char *source_reg, ostream& s)
+static void emit_move(const char *dest_reg, const char *source_reg, ostream& s)
 { s << MOVE << dest_reg << " " << source_reg << endl; }
 
 static void emit_neg(char *dest, char *src1, ostream& s)
@@ -213,7 +227,7 @@ static void emit_add(char *dest, char *src1, char *src2, ostream& s)
 static void emit_addu(char *dest, char *src1, char *src2, ostream& s)
 { s << ADDU << dest << " " << src1 << " " << src2 << endl; }
 
-static void emit_addiu(char *dest, char *src1, int imm, ostream& s)
+static void emit_addiu(const char *dest, const char *src1, int imm, ostream& s)
 { s << ADDIU << dest << " " << src1 << " " << imm << endl; }
 
 static void emit_div(char *dest, char *src1, char *src2, ostream& s)
@@ -231,7 +245,7 @@ static void emit_sll(char *dest, char *src1, int num, ostream& s)
 static void emit_jalr(char *dest, ostream& s)
 { s << JALR << "\t" << dest << endl; }
 
-static void emit_jal(char *address,ostream &s)
+static void emit_jal(const char *address,ostream &s)
 { s << JAL << address << endl; }
 
 static void emit_return(ostream& s)
@@ -408,7 +422,7 @@ void StringEntry::code_def(ostream& s, int stringclasstag)
 
  /***** Add dispatch information for class String ******/
 
-      s << endl;                                              // dispatch table
+      emit_disptable_ref(Str, s); s << endl;       // dispatch table
       s << WORD;  lensym->code_ref(s);  s << endl;            // string length
   emit_string_constant(s,str);                                // ascii string
   s << ALIGN;                                                 // align to word
@@ -449,8 +463,8 @@ void IntEntry::code_def(ostream &s, int intclasstag)
       << WORD; 
 
  /***** Add dispatch information for class Int ******/
-
-      s << endl;                                          // dispatch table
+ 
+      emit_disptable_ref(Int, s); s << endl;    // dispatch table
       s << WORD << str << endl;                           // integer value
 }
 
@@ -493,8 +507,8 @@ void BoolConst::code_def(ostream& s, int boolclasstag)
       << WORD;
 
  /***** Add dispatch information for class Bool ******/
-
-      s << endl;                                            // dispatch table
+ 
+      emit_disptable_ref(Bool, s); s << endl;    // dispatch table
       s << WORD << val << endl;                             // value (0 or 1)
 }
 
@@ -519,6 +533,23 @@ void CgenClassTable::code_class_objTab()
 		l->hd()->code_classobj(str);
 }
 
+void CgenClassTable::code_class_inheritTab()
+{
+	str << CLASSINHERITTAB << LABEL;
+	int tagid = 0;
+	for (List<CgenNode> *l = nds; l; l = l->tl()) {
+		n2tag[l->hd()->name] = tagid++;
+	}
+
+	n2tag[No_class] = tagid;
+
+
+	for (List<CgenNode> *l = nds; l; l = l->tl()) {
+		str << WORD << n2tag[l->hd()->parent] << endl;
+	}
+
+}
+
 void CgenClassTable::code_class_dispTab()
 {
 	for (List<CgenNode> *l = nds; l; l = l->tl()) 
@@ -540,7 +571,7 @@ void CgenClassTable::code_class_initObj()
 
 void CgenClassTable::code_class_method()
 {
-	for (List<CgenNode> *l = nds, l; l = l->tl())
+	for (List<CgenNode> *l = nds; l; l = l->tl())
 		l->hd()->code_method(str);
 }
 
@@ -663,9 +694,6 @@ void CgenClassTable::code_constants()
 
 CgenClassTable::CgenClassTable(Classes classes, ostream& s) : nds(NULL) , str(s)
 {
-   stringclasstag = 4 /* Change to your String class tag here */;
-   intclasstag =    2 /* Change to your Int class tag here */;
-   boolclasstag =   3 /* Change to your Bool class tag here */;
 
    enterscope();
    if (cgen_debug) cout << "Building CgenClassTable" << endl;
@@ -673,7 +701,28 @@ CgenClassTable::CgenClassTable(Classes classes, ostream& s) : nds(NULL) , str(s)
    install_classes(classes);
    build_inheritance_tree();
 
+   int idx = 0;
+   for (List<CgenNode> *l = nds; l; l = l->tl()) {
+	   Symbol name = l->hd()->name;
+	   if (name == Str) {
+		   stringclasstag = idx;
+	   } else if (name == Int) {
+		   intclasstag = idx;
+	   } else if (name == Bool) {
+		   boolclasstag = idx;
+
+	   }
+	   idx++;
+   }
+
+
+   locations = new SymbolTable<Symbol, int>();
+
+   class_table = this;
+
    code();
+
+   delete locations;
    exitscope();
 }
 
@@ -885,6 +934,9 @@ void CgenClassTable::code()
   if (cgen_debug) cout << "coding class_objTab" << endl;
   code_class_objTab();
 
+  if (cgen_debug) cout << "coding class_inheritTab" << endl;
+  code_class_inheritTab();
+
   if (cgen_debug) cout << "coding class_dispTab" << endl;
   code_class_dispTab();
 
@@ -946,38 +998,13 @@ void CgenNode::code_dispTab(ostream &s)
 { 
 	emit_disptable_ref(name, s); s << LABEL;
 
-	std::vector<std::pair<Symbol, Symbol> > methods_list;
-	std::set<Symbol> methods;
-	code_dispTab(this, methods, methods_list);
-	for (int i = methods_list.size() - 1; i >= 0; i--) {
-		s << WORD; emit_method_ref(methods_list[i].first, methods_list[i].second, s); s << endl;
+	std::map<Symbol, Symbol> method2class;
+	std::vector<Symbol> methods;
+	get_features(Feature_class::METHOD, this, methods, method2class);
+	for (int i = 0; i < static_cast<int>(methods.size()); ++i) {
+		s << WORD; emit_method_ref(method2class[methods[i]], methods[i], s); s << endl;
 	}
 }
-
-void CgenNode::code_dispTab(CgenNodeP node, std::set<Symbol> &methods, std::vector<std::pair<Symbol, Symbol> > &methods_list)
-{
-	if (NULL == node->parentnd)
-		return;
-	Features features = node->features;
-	for (int i = features->first(); features->more(i); i = features->next(i)) {
-		features->nth(i)->emit_method(node->name, methods, methods_list);
-	}
-	code_dispTab(node->parentnd, methods, methods_list);
-}
-
-void method_class::emit_method(Symbol className, std::set<Symbol> &methods, std::vector<std::pair<Symbol, Symbol> > &methods_list)
-{
-	if (methods.find(name) == methods.end()) {
-		methods.insert(name);
-		methods_list.push_back(std::make_pair(className, name));
-	}
-}
-
-void attr_class::emit_method(Symbol _className, std::set<Symbol> &methods, std::vector<std::pair<Symbol, Symbol> >&methods_list)
-{
-	// keep empty
-}
-
 
 void CgenNode::code_protObj(ostream &s, int idx)
 {
@@ -986,23 +1013,23 @@ void CgenNode::code_protObj(ostream &s, int idx)
 	emit_protobj_ref(name, s); s << LABEL;
 	s << WORD << idx << endl;
 
-	std::vector<Symbol> attrs_init;
-	std::set<Symbol> attrs;
+	std::map<Symbol, Symbol> attr2type;
+	std::vector<Symbol> attrs;
 
-	get_attrs(attrs_init, attrs, this);
-	int len = 3 + attrs_init.size(); 
+	get_features(Feature_class::ATTR, this, attrs, attr2type);
+	int len = 3 + attrs.size(); 
 
 	s << WORD << len << endl;
 
 	s << WORD; emit_disptable_ref(name, s); s << endl;
 
-	for (int i = 0; i < static_cast<int>(attrs_init.size()); i++) {
-		Symbol attr_init = attrs_init[i];
-		if (Int == attr_init) {
+	for (int i = 0; i < static_cast<int>(attrs.size()); i++) {
+		Symbol type = attr2type[attrs[i]];
+		if (Int == type) {
 			s << WORD; inttable.lookup_string("0")->code_ref(s); s << endl;
-		} else if (Str == attr_init) {
+		} else if (Str == type) {
 			s << WORD; stringtable.lookup_string("")->code_ref(s); s << endl;
-		} else if (Bool == attr_init) {
+		} else if (Bool == type) {
 			s << WORD; falsebool.code_ref(s); s << endl;
 		} else {
 			s << WORD << 0 << endl;
@@ -1010,42 +1037,196 @@ void CgenNode::code_protObj(ostream &s, int idx)
 	}
 }
 
-void CgenNode::get_attrs(std::vector<Symbol> &attrs_init, std::set<Symbol> &attrs, CgenNodeP node)
+
+void CgenNode::get_features(int type, CgenNodeP node, std::vector<Symbol> &names, std::map<Symbol, Symbol> &name2class)
 {
-	if (NULL == node->parentnd) {
+	if (node->name == No_class)
 		return;
-	}
-	get_attrs(attrs_init, attrs, node->parentnd);
+	get_features(type, node->parentnd, names, name2class);
 	Features features = node->features;
 	for (int i = features->first(); features->more(i); i = features->next(i)) {
-		features->nth(i)->emit_attr(attrs_init, attrs);
+		Feature feature = features->nth(i);
+		if (feature->get_type() == type) {
+			Symbol type_decl;
+			Symbol name = feature->get_name();
+			if (name2class.find(name) == name2class.end()) {
+				feature->set_offset(names.size(), type_decl);
+				names.push_back(name);
+			} else {
+				for (int j = 0; j < static_cast<int>(names.size()); j++) {
+					if (names[j] == name) {
+						feature->set_offset(j, type_decl);
+						break;
+					}
+				}
+			}
+			if (type == Feature_class::METHOD) {
+				name2class[name] = node->name;
+			} else if (type == Feature_class::ATTR) {
+				name2class[name] = type_decl;
+			}
+		}
 	}
 }
 
-void method_class::emit_attr(std::vector<Symbol> &attrs_init, std::set<Symbol> &attrs)
+void attr_class::set_offset(int n, Symbol &t)
 {
-	// keep empty
+	t = type_decl;
+	offset = n;
 }
 
-void attr_class::emit_attr(std::vector<Symbol> &attrs_init, std::set<Symbol> &attrs)
+void method_class::set_offset(int n, Symbol &_t)
 {
-	if (attrs.find(name) == attrs.end()) {
-		attrs.insert(name);
-		attrs_init.push_back(type_decl);
-	}
+	offset = n;
+}
+
+int attr_class::get_type()
+{
+	return Feature_class::ATTR;
+}
+
+int method_class::get_type()
+{
+	return Feature_class::METHOD;
+}
+
+void enterfunc(ostream &s)
+{
+	emit_addiu(SP, SP, -12, s); 
+	emit_store(FP, 3, SP, s);
+	emit_store(SELF, 2, SP, s);
+	emit_store(RA, 1, SP, s);
+
+	emit_addiu(FP, SP, 4, s);
+
+	emit_move(SELF, ACC, s);
+
+	sp_level = 0;
+
+}
+
+void exitfunc(ostream &s, int n)
+{
+	emit_load(FP, 3, SP, s);
+	emit_load(SELF, 2, SP, s);
+	emit_load(RA, 1, SP, s);
+	emit_addiu(SP, SP, 12 + n * 4, s);
+	emit_return(s);
 }
 
 void CgenNode::code_initObj(ostream &s)
 {
 	emit_init_ref(name, s); s << LABEL;
+	enterfunc(s);
 
+	if (parentnd->name != No_class) {
+		std::ostringstream strout;
+		emit_init_ref(parentnd->name, strout);
+		emit_jal(strout.str().c_str(), s);
+	}
+
+	self_ = this;
+
+	for (int i = features->first(); features->more(i); i = features->next(i)) {
+		features->nth(i)->initialization(s);
+	}
+
+	emit_move(ACC, SELF, s);
+
+	exitfunc(s, 0);
+}
+
+
+
+void attr_class::initialization(ostream &s)
+{
+	if (!init->is_no_expr()) {
+		init->code(s);
+		emit_store(ACC, 3 + offset, SELF, s);
+	}
+}
+
+void method_class::emit_method(ostream &s)
+{
+	emit_method_ref(self_->name, name, s); s << LABEL;
+
+	locations->enterscope();
+
+	int idx = formals->len();
+	for (int i = formals->first(); formals->more(i); i = formals->next(i)) {
+		locations->addid(formals->nth(i)->get_name(), new int(3 + --idx));
+	}
+
+	enterfunc(s);
+
+	expr->code(s);
+
+	exitfunc(s, formals->len());
+
+	locations->exitscope();
 }
 
 void CgenNode::code_method(ostream &s)
 {
+	if (!basic()) {
+		self_ = this;
+
+		for (int i = features->first(); features->more(i); i = features->next(i)) {
+			features->nth(i)->emit_method(s);
+		}
+	}
+}
+
+int CgenNode::get_offset(Symbol name, int type)
+{
+	CgenNodeP p = this;
+	while (p->name != No_class) {
+		Features f = p->features;
+		for (int i = f->first(); f->more(i); i = f->next(i)) {
+			Feature f0 = f->nth(i);
+			if (f0->get_type() == type && f0->get_name() == name) {
+				return f0->get_offset();
+			}
+		}
+		p = p->parentnd;
+	}
+	// never to this
+	assert(false);
+	return -1;
+}
+
+Symbol CgenNode::get_low_method_type(Symbol name)
+{
+
+	CgenNodeP p = this;
+	while (p->name != No_class) {
+		Features f = p->features;
+		for (int i = f->first(); f->more(i); i = f->next(i)) {
+			Feature f0 = f->nth(i);
+			if (f0->get_type() == Feature_class::METHOD && f0->get_name() == name) {
+				return p->name;
+			}
+		}
+		p = p->parentnd;
+	}
+	// never to this
+	assert(false);
+	return NULL;
 
 }
 
+std::pair<const char *, int> get_location(Symbol name)
+{
+	int *p = locations->lookup(name);
+	if (p != NULL) {
+		return std::make_pair(FP, *p);
+	} else {
+		return std::make_pair(SELF, 3 + self_->get_offset(name, Feature_class::ATTR));
+	}
+}
+
+
+/*
 void method_class::code(ostream &s, CgenNodeP node)
 {
 	emit_method_ref(node->name, name, s); s << LABEL;
@@ -1056,6 +1237,7 @@ void attr_class::code(ostream &s)
 {
 	// keep empty
 }
+*/
 
 
 //******************************************************************
@@ -1068,55 +1250,348 @@ void attr_class::code(ostream &s)
 //
 //*****************************************************************
 
-void assign_class::code(ostream &s) {
+void call_method(Symbol type_name, Symbol name, ostream &s)
+{
+	std::ostringstream strout;
+	emit_method_ref(type_name, name, strout);
+	emit_jal(strout.str().c_str(), s);
 }
 
-void static_dispatch_class::code(ostream &s) {
+void load_protobj(Symbol type, ostream &s)
+{
+	std::ostringstream strout;
+	emit_protobj_ref(type, strout);
+	emit_load_address(ACC, strout.str().c_str(), s);
 }
 
-void dispatch_class::code(ostream &s) {
+
+int get_label()
+{
+	return LABEL_COUNT++;
 }
 
-void cond_class::code(ostream &s) {
+void assign_class::code(ostream &s) 
+{
+	expr->code(s);
+	std::pair<const char *, int> r = get_location(name);
+	emit_store(ACC, r.second, r.first, s);
+	/*
+	emit_addiu(A1, r.first, r.second * 4, s);
+	emit_gc_assign(s);
+	*/
 }
 
-void loop_class::code(ostream &s) {
+void emit_void_abort(int line_number, const char *func, ostream &s)
+{
+	int label = get_label();
+	emit_bne(ACC, ZERO, label, s);
+
+	emit_load_string(ACC, stringtable.lookup_string(self_->filename->get_string()), s);
+	emit_load_imm(T1, line_number, s);
+	emit_jal(func, s);
+
+	emit_label_def(label, s);
 }
 
-void typcase_class::code(ostream &s) {
+void code_dispatch(bool is_dynamic, Expression expr, 
+		Symbol type_name, Symbol name, Expressions actual, ostream &s)
+{
+	if (type_name == SELF_TYPE) {
+		type_name = self_->name;
+	}
+
+	for (int i = actual->first(); actual->more(i); i = actual->next(i)) {
+		actual->nth(i)->code(s);
+		emit_push(ACC, s);
+		sp_level++;
+	}
+
+	expr->code(s);
+	
+	//cout << name << " " << expr->get_type() << endl;
+
+	emit_void_abort(expr->get_line_number(), "_dispatch_abort", s);
+
+
+	if (is_dynamic) {
+		emit_load(T1, 2, ACC, s);
+		int offset = class_table->probe(type_name)->get_offset(name, Feature_class::METHOD);
+		//cout << name << " " << offset << endl;
+		emit_load(T1, offset, T1, s);
+		emit_jalr(T1, s);
+	} else {
+		call_method(class_table->probe(type_name)->get_low_method_type(name), name, s);
+	}
+	sp_level -= actual->len();
 }
 
-void block_class::code(ostream &s) {
+void static_dispatch_class::code(ostream &s) 
+{
+	code_dispatch(false, expr, type_name, name, actual, s);
 }
 
-void let_class::code(ostream &s) {
+void dispatch_class::code(ostream &s) 
+{
+	code_dispatch(true, expr, expr->get_type(), name, actual, s);
 }
 
-void plus_class::code(ostream &s) {
+
+void cond_class::code(ostream &s) 
+{
+	pred->code(s);
+	int l1 = get_label(), l2 = get_label();
+	emit_load(ACC, 3, ACC, s);
+	emit_beqz(ACC, l1, s);
+	then_exp->code(s);
+	emit_branch(l2, s);
+	emit_label_def(l1, s);
+	else_exp->code(s);
+	emit_label_def(l2, s);
 }
 
-void sub_class::code(ostream &s) {
+void loop_class::code(ostream &s) 
+{
+	int loop_label  = get_label(), outloop_label = get_label();
+	emit_label_def(loop_label, s);
+	pred->code(s);
+	emit_load(ACC, 3, ACC, s);
+	emit_beqz(ACC, outloop_label, s);
+
+	body->code(s);
+
+	emit_branch(loop_label, s);
+	emit_label_def(outloop_label, s);
+
 }
 
-void mul_class::code(ostream &s) {
+void beq_tag(Symbol x, std::vector<int> &labels, ostream &s)
+{
+	emit_load_imm(T2, n2tag[x], s);
+	int label = get_label();
+	labels.push_back(label);
+	emit_beq(T1, T2, label, s);
 }
 
-void divide_class::code(ostream &s) {
+void typcase_class::code(ostream &s) 
+{
+	expr->code(s);
+
+	emit_void_abort(expr->get_line_number(), "_case_abort2", s);
+
+	// load tag
+	emit_load(T1, 0, ACC, s);
+
+	int loop_label = get_label();
+
+	emit_label_def(loop_label, s);
+
+	std::vector<int> labels;
+	for (int i = cases->first(); cases->more(i); i = cases->next(i)) {
+		branch_class *b = static_cast<branch_class *>(cases->nth(i));
+		beq_tag(b->type_decl, labels, s);
+	}
+	emit_load_address(T2, CLASSINHERITTAB, s);
+	emit_sll(T1, T1, 2, s);
+	emit_addu(T2, T2, T1, s);
+	emit_load(T1, 0, T2, s);
+	emit_load_imm(T2, n2tag[No_class], s);
+	emit_bne(T1, T2, loop_label, s);
+
+	emit_move(ACC, SELF, s);
+	emit_jal("_case_abort", s);
+
+
+	int final_label = get_label();
+
+	int idx = 0;
+	for (int i = cases->first(); cases->more(i); i = cases->next(i)) {
+		branch_class *b = static_cast<branch_class *>(cases->nth(i));
+		emit_label_def(labels[idx++], s);
+
+		emit_push(ACC, s);
+		sp_level++;
+
+		locations->enterscope();
+		locations->addid(b->name, new int(-sp_level));
+
+		b->expr->code(s);
+
+		locations->exitscope();
+
+		emit_addiu(SP, SP, 4, s);
+		sp_level--;
+
+		emit_branch(final_label, s);
+	}
+
+	emit_label_def(final_label, s);
+
+
 }
 
-void neg_class::code(ostream &s) {
+void block_class::code(ostream &s) 
+{
+	for (int i = body->first(); body->more(i); i = body->next(i)) {
+		body->nth(i)->code(s);
+	}
 }
 
-void lt_class::code(ostream &s) {
+void let_class::code(ostream &s) 
+{
+	init->code(s);
+
+
+	if (init->is_no_expr()) {
+		std::ostringstream strout;
+		if (Int == type_decl) {
+			inttable.lookup_string("0")->code_ref(strout);
+		} else if (Str == type_decl) {
+			stringtable.lookup_string("")->code_ref(strout); 
+		} else if (Bool == type_decl) {
+			falsebool.code_ref(strout); 
+		} 			
+
+		if (strout.str().length() != 0) {
+			emit_load_address(ACC, strout.str().c_str(), s);
+		} else {
+			emit_load_imm(ACC, 0, s);
+		}
+	} 
+	emit_push(ACC, s);
+	sp_level++;
+
+	locations->enterscope();
+
+	locations->addid(identifier, new int(-sp_level));
+
+	body->code(s);
+
+	locations->exitscope();
+
+	emit_addiu(SP, SP, 4, s);
+
+	sp_level--;
 }
 
-void eq_class::code(ostream &s) {
+void save_t1(ostream &s)
+{
+	emit_push(T1, s);
+	sp_level++;
 }
 
-void leq_class::code(ostream &s) {
+void load_t1(ostream &s)
+{
+	emit_addiu(SP, SP, 4, s);
+	sp_level--;
+	emit_load(T1, 0, SP, s);
 }
 
-void comp_class::code(ostream &s) {
+void code_2expr(Expression e1, Expression e2, ostream &s)
+{
+	e1->code(s);
+	emit_fetch_int(T1, ACC, s);
+	save_t1(s);
+	e2->code(s);
+	load_t1(s);
+	emit_fetch_int(ACC, ACC, s);
+}
+
+
+void code_arith(Expression e1, Expression e2, void (op)(char *, char *, char *, ostream&), ostream &s)
+{
+	code_2expr(e1, e2, s);
+	op(T1, T1, ACC, s);
+
+	load_protobj(Int, s);
+	save_t1(s);
+	call_method(Object, ::copy, s);
+	load_t1(s);
+
+	emit_store_int(T1, ACC, s);
+}
+
+void code_compare(Expression e1, Expression e2, void (op)(char *, char *, int, ostream &), ostream &s)
+{
+	code_2expr(e1, e2, s);
+	emit_load_bool(T2, truebool, s);
+	int label = get_label();
+	op(T1, ACC, label, s);
+	emit_load_bool(T2, falsebool, s);
+	emit_label_def(label, s);
+	emit_move(ACC, T2, s);
+}
+
+
+void plus_class::code(ostream &s) 
+{
+	code_arith(e1, e2, emit_add, s);
+}
+
+void sub_class::code(ostream &s) 
+{
+	code_arith(e1, e2, emit_sub, s);
+}
+
+void mul_class::code(ostream &s) 
+{
+	code_arith(e1, e2, emit_mul, s);
+}
+
+void divide_class::code(ostream &s) 
+{
+	code_arith(e1, e2, emit_div, s);
+}
+
+void neg_class::code(ostream &s) 
+{
+	e1->code(s);
+	call_method(Object, ::copy, s);
+	emit_fetch_int(T1, ACC, s);
+	emit_neg(T1, T1, s);
+	emit_store_int(T1, ACC, s);
+}
+
+void lt_class::code(ostream &s) 
+{
+	code_compare(e1, e2, emit_blt, s);
+}
+
+void eq_class::code(ostream &s) 
+{
+	e1->code(s);
+	emit_move(T1, ACC, s);
+	save_t1(s);
+	e2->code(s);
+	load_t1(s);
+	emit_move(T2, ACC, s);
+
+	emit_load_bool(ACC, truebool, s);
+
+	int label = get_label();
+
+	emit_beq(T1, T2, label, s);
+
+	emit_load_bool(A1, falsebool, s);
+	emit_jal("equality_test", s);
+
+	emit_label_def(label, s);
+	
+}
+
+void leq_class::code(ostream &s) 
+{
+	code_compare(e1, e2, emit_bleq, s);
+}
+
+void comp_class::code(ostream &s) 
+{
+	e1->code(s);
+	emit_load(T1, DEFAULT_OBJFIELDS, ACC, s);
+	emit_load_bool(ACC, truebool, s);
+	int label = get_label();
+	emit_beqz(T1, label, s);
+	emit_load_bool(ACC, falsebool, s);
+	emit_label_def(label, s);
 }
 
 void int_const_class::code(ostream& s)  
@@ -1137,17 +1612,60 @@ void bool_const_class::code(ostream& s)
   emit_load_bool(ACC, BoolConst(val), s);
 }
 
-void new__class::code(ostream &s) {
+void code_obj_offset(int id, ostream& s)
+{
+	emit_load(T1, 0, SELF, s);
+	emit_sll(T1, T1, 3, s);
+	emit_addiu(T1, T1, id * 4, s);
+	emit_load_address(T2, CLASSOBJTAB, s);
+	emit_addu(T2, T2, T1, s);
 }
 
-void isvoid_class::code(ostream &s) {
+void new__class::code(ostream &s) 
+{
+	Symbol type = type_name;
+	if (type == SELF_TYPE) {
+		code_obj_offset(0, s);
+		emit_load(ACC, 0, T2, s);
+		call_method(Object, ::copy, s);
+		code_obj_offset(1, s);
+		emit_load(T2, 0, T2, s);
+		emit_jalr(T2, s);
+	} else {
+		load_protobj(type, s);
+		call_method(Object, ::copy, s);
+		std::ostringstream strout;
+		emit_init_ref(type, strout);
+		emit_jal(strout.str().c_str(), s);
+	}
 }
 
-void no_expr_class::code(ostream &s) {
+void isvoid_class::code(ostream &s) 
+{
+	e1->code(s);
+	emit_move(T1, ACC, s);
+	emit_load_bool(ACC, truebool, s);
+	int label = get_label(); 
+	emit_beqz(T1, label, s);
+	emit_load_bool(ACC, falsebool, s);
+	emit_label_def(label, s);
 }
 
-void object_class::code(ostream &s) {
-
+void no_expr_class::code(ostream &s) 
+{
+	// keep empty
 }
+
+void object_class::code(ostream &s) 
+{
+	if (name == self) {
+		emit_move(ACC, SELF, s);
+	} else {
+		std::pair<const char *, int> ret = get_location(name);
+		emit_load(ACC, ret.second, ret.first, s);
+	}
+}
+
+
 
 
